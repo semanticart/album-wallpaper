@@ -220,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let redownloadItem = NSMenuItem(title: "Re-download Current Art (discards edits)", action: #selector(redownload), keyEquivalent: "")
     private let updateAvailableItem = NSMenuItem(title: "Update Available", action: #selector(checkForUpdatesNow), keyEquivalent: "")
     private let checkForUpdatesItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesNow), keyEquivalent: "")
-    private let checkForUpdatesToggleItem = NSMenuItem(title: "Check for Updates", action: #selector(toggleCheckForUpdates), keyEquivalent: "")
+    private let checkForUpdatesToggleItem = NSMenuItem(title: "Automatically Check for Updates", action: #selector(toggleCheckForUpdates), keyEquivalent: "")
     private let installUpdatesAutomaticallyItem = NSMenuItem(title: "Install Updates Automatically", action: #selector(toggleInstallUpdatesAutomatically), keyEquivalent: "")
 
     private let updater = Updater()
