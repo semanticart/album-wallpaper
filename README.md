@@ -14,33 +14,39 @@ whatever's currently playing in Music.app.
 - Lets you edit the current art in Preview, or pixelate it, right from the
   menu
 - Toggle "Fill Screen" to crop-to-fit vs. letterbox
+- Updates itself in the background via [Sparkle](https://sparkle-project.org/),
+  checking [GitHub Releases](https://github.com/semanticart/album-wallpaper/releases)
+  once a day (toggle this, or manual "Check for Updates…", from the menu)
 
 ## Requirements
 
 - macOS 13 (Ventura) or later
 - Xcode Command Line Tools (provides `swift` and `codesign`)
 
-No external dependencies — the app only uses `AppKit`, `Foundation`, and
+The only external dependency is [Sparkle](https://sparkle-project.org/), for
+self-updating; otherwise the app only uses `AppKit`, `Foundation`, and
 `CoreImage`.
 
 ## Build
 
 ```sh
-./build.sh
+make run
 ```
 
-This runs `swift build -c release`, assembles `AlbumArtWallpaper.app` next to
-the script, and ad-hoc codesigns it (no Apple Developer account needed).
-
-Run it with:
-
-```sh
-open AlbumArtWallpaper.app
-```
+This runs `swift build -c release`, assembles `.build/AlbumArtWallpaper.app`,
+codesigns it (with a Developer ID identity if one is in your keychain,
+otherwise ad-hoc), and opens it. `make install` does the same but installs to
+`/Applications` instead.
 
 The first time it talks to Music.app, macOS will prompt you to grant
 Automation permission — accept it, since that's how the app reads the
 current track.
+
+## Releasing
+
+Releases are published by GitHub Actions from a pushed version tag and
+installed copies update themselves through Sparkle — see
+[RELEASING.md](RELEASING.md).
 
 ## Regenerating icons
 

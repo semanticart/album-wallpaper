@@ -1,0 +1,143 @@
+name: Release
+
+# Publishes a GitHub Release with a downloadable, notarized AlbumArtWallpaper
+# DMG whenever a version tag is pushed:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The tag name (minus the leading "v") is stamped into the bundle version, the
+# release .app is built, signed with the Developer ID certificate, packaged into
+# a DMG via `make dist`, notarized and stapled via `make notarize`, described
+# in a Sparkle appcast via `make appcast`, and attached to a release whose
+# notes are auto-generated from the commits/PRs since the last tag. Installed
+# copies pick the release up through Sparkle from the appcast. You can also
+# trigger it by hand from the Actions tab, passing the tag to cut.
+#
+# Required repository secrets (see RELEASING.md):
+#   BUILD_CERTIFICATE_BASE64  base64 of the Developer ID Application .p12
+#   P12_PASSWORD              password protecting the .p12
+#   KEYCHAIN_PASSWORD         any random string; guards the throwaway CI keychain
+#   APPLE_ID                  Apple ID email that owns the Developer account
+#   APPLE_TEAM_ID             10-character team identifier
+#   APP_SPECIFIC_PASSWORD     app-specific password for notarytool
+#   SPARKLE_PRIVATE_KEY       private EdDSA key matching SUPublicEDKey in
+#                             Resources/Info.plist (see RELEASING.md)
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+
+      # The tag is passed via env (not ${{ }} interpolation into the script) and
+      # validated against the x.y.z shape, so a crafted tag name can't inject
+      # shell into this or any later step that uses these outputs.
+      - name: Resolve version
+        id: version
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "tag '$TAG' must look like vX.Y.Z" >&2
+            exit 1
+          }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Show toolchain
+        run: swift --version
+
+      # Import the Developer ID certificate into a throwaway keychain. The
+      # Makefile auto-detects signing identities via `security find-identity`,
+      # so once the keychain is in the search list, `make dist` signs with it.
+      - name: Import signing certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S "apple-tool:,apple:" \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Stamp version into Info.plist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          /usr/libexec/PlistBuddy -c \
+            "Set :CFBundleShortVersionString $VERSION" \
+            Resources/Info.plist
+          /usr/libexec/PlistBuddy -c \
+            "Set :CFBundleVersion ${{ github.run_number }}" \
+            Resources/Info.plist
+
+      - name: Build and package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: make dist VERSION="$VERSION"
+
+      # NOTARY_ARGS is single-quoted with $$-escaped variables so the secret
+      # values never appear in make's echoed command line; the recipe's shell
+      # expands them from the environment only when notarytool runs.
+      - name: Notarize and staple
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_SPECIFIC_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
+        run: |
+          make notarize VERSION="$VERSION" \
+            NOTARY_ARGS='--apple-id "$$APPLE_ID" --team-id "$$APPLE_TEAM_ID" --password "$$APP_SPECIFIC_PASSWORD"'
+
+      # The private key reaches generate_appcast on stdin, never as an
+      # argument, so it shows up in no process listing or echoed recipe.
+      - name: Generate appcast
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          echo "$SPARKLE_PRIVATE_KEY" | make appcast VERSION="$VERSION" ED_KEY_ARGS='--ed-key-file -'
+
+      # The DMG is attached twice: once versioned, once as a stable
+      # "AlbumArtWallpaper.dmg" so
+      # https://github.com/semanticart/album-wallpaper/releases/latest/download/AlbumArtWallpaper.dmg
+      # always resolves to the newest release. appcast.xml rides along the
+      # same way: installed apps read it from
+      # releases/latest/download/appcast.xml, and its enclosure points at the
+      # versioned DMG of this release.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cp ".build/dist/AlbumArtWallpaper-$VERSION.dmg" \
+            ".build/dist/AlbumArtWallpaper.dmg"
+          gh release create "$TAG" \
+            ".build/dist/AlbumArtWallpaper-$VERSION.dmg" \
+            ".build/dist/AlbumArtWallpaper.dmg" \
+            ".build/dist/appcast/appcast.xml" \
+            --title "AlbumArtWallpaper $TAG" \
+            --generate-notes

@@ -218,6 +218,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let editItem = NSMenuItem(title: "Edit Current Art in Preview", action: #selector(editCurrent), keyEquivalent: "e")
     private let pixelateItem = NSMenuItem(title: "Pixelate Current Art…", action: #selector(pixelateCurrent), keyEquivalent: "")
     private let redownloadItem = NSMenuItem(title: "Re-download Current Art (discards edits)", action: #selector(redownload), keyEquivalent: "")
+    private let updateAvailableItem = NSMenuItem(title: "Update Available", action: #selector(checkForUpdatesNow), keyEquivalent: "")
+    private let checkForUpdatesItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesNow), keyEquivalent: "")
+    private let checkForUpdatesToggleItem = NSMenuItem(title: "Check for Updates", action: #selector(toggleCheckForUpdates), keyEquivalent: "")
+    private let installUpdatesAutomaticallyItem = NSMenuItem(title: "Install Updates Automatically", action: #selector(toggleInstallUpdatesAutomatically), keyEquivalent: "")
+
+    private let updater = Updater()
 
     private var current: Track?
     private var appliedFile: URL?
@@ -232,9 +238,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         get { UserDefaults.standard.bool(forKey: "fill") }
         set { UserDefaults.standard.set(newValue, forKey: "fill") }
     }
+    private var checkForUpdates: Bool {
+        get { UserDefaults.standard.object(forKey: "checkForUpdates") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "checkForUpdates") }
+    }
+    private var installUpdatesAutomatically: Bool {
+        get { UserDefaults.standard.object(forKey: "installUpdatesAutomatically") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "installUpdatesAutomatically") }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ArtCache.prepare()
+
+        // Before the menu is built, so it can offer "Check for Updates".
+        updater.start()
+        updater.setAutomaticallyChecksForUpdates(checkForUpdates)
+        updater.setAutomaticallyDownloadsUpdates(installUpdatesAutomatically)
+        updater.onAvailableVersionChanged = { [weak self] in self?.refreshMenu() }
+
         buildMenu()
 
         // Music posts this on every play/pause/track change — no polling needed.
@@ -283,7 +304,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let menu = NSMenu()
         nowPlayingItem.isEnabled = false
-        for item in [enabledItem, fillItem, editItem, pixelateItem, redownloadItem] { item.target = self }
+        let targeted = [
+            enabledItem, fillItem, editItem, pixelateItem, redownloadItem,
+            updateAvailableItem, checkForUpdatesItem, checkForUpdatesToggleItem, installUpdatesAutomaticallyItem,
+        ]
+        for item in targeted { item.target = self }
         menu.addItem(nowPlayingItem)
         menu.addItem(.separator())
         menu.addItem(enabledItem)
@@ -295,6 +320,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let reveal = NSMenuItem(title: "Reveal Cache in Finder", action: #selector(revealCache), keyEquivalent: "")
         reveal.target = self
         menu.addItem(reveal)
+        menu.addItem(.separator())
+        menu.addItem(updateAvailableItem)
+        menu.addItem(checkForUpdatesItem)
+        menu.addItem(checkForUpdatesToggleItem)
+        menu.addItem(installUpdatesAutomaticallyItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
@@ -312,6 +342,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.isEnabled = appliedFile != nil
         pixelateItem.isEnabled = appliedFile != nil
         redownloadItem.isEnabled = current != nil
+
+        if let version = updater.availableVersion {
+            updateAvailableItem.title = "Update Available — \(version)…"
+            updateAvailableItem.isHidden = false
+        } else {
+            updateAvailableItem.isHidden = true
+        }
+        checkForUpdatesItem.isHidden = !updater.isActive
+        checkForUpdatesToggleItem.isHidden = !updater.isActive
+        checkForUpdatesToggleItem.state = checkForUpdates ? .on : .off
+        installUpdatesAutomaticallyItem.isHidden = !updater.isActive
+        installUpdatesAutomaticallyItem.state = installUpdatesAutomatically ? .on : .off
+        installUpdatesAutomaticallyItem.isEnabled = checkForUpdates
     }
 
     // MARK: Actions
@@ -369,6 +412,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             NSWorkspace.shared.open(ArtCache.dir)
         }
+    }
+
+    @objc private func checkForUpdatesNow() {
+        updater.checkForUpdates()
+    }
+
+    @objc private func toggleCheckForUpdates() {
+        checkForUpdates.toggle()
+        updater.setAutomaticallyChecksForUpdates(checkForUpdates)
+        refreshMenu()
+    }
+
+    @objc private func toggleInstallUpdatesAutomatically() {
+        installUpdatesAutomatically.toggle()
+        updater.setAutomaticallyDownloadsUpdates(installUpdatesAutomatically)
+        refreshMenu()
     }
 
     // MARK: Track handling
