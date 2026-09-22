@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+<defs>
+<mask id="v" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+<rect width="100" height="100" fill="#fff"/>
+<!-- gap where the sleeve overlaps the record -->
+<rect x="7" y="22" width="56" height="56" rx="6" fill="#000" stroke="#000" stroke-width="6"/>
+<!-- groove ring and spindle hole -->
+<circle cx="73" cy="50" r="15" fill="none" stroke="#000" stroke-width="3"/>
+<circle cx="73" cy="50" r="3.5" fill="#000"/>
+</mask>
+<mask id="s" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+<rect width="100" height="100" fill="#fff"/>
+<!-- sun and peaks cut out of the sleeve -->
+<circle cx="23" cy="38" r="6" fill="#000"/>
+<path d="M14 69 L14 67 L27 54 L36 63 L43 57 L52 66 L52 69 Z" fill="#000"/>
+</mask>
+</defs>
+<circle cx="73" cy="50" r="25" fill="#000" mask="url(#v)"/>
+<rect x="7" y="22" width="56" height="56" rx="6" fill="#000" mask="url(#s)"/>
+</svg>
