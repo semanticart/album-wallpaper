@@ -314,9 +314,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() {
         if let button = statusItem.button {
-            // MenuBarIcon.png is 36px black-on-clear, shown at 18pt; as a template it follows the menu bar's light/dark tint.
+            // MenuBarIcon.png is 36px black-on-clear, shown at 22pt; as a template it follows the menu bar's light/dark tint.
             let glyph = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png").flatMap(NSImage.init(contentsOf:))
-            glyph?.size = NSSize(width: 18, height: 18)
+            glyph?.size = NSSize(width: 22, height: 22)
             glyph?.isTemplate = true
             button.image = glyph ?? NSImage(systemSymbolName: "music.note.tv", accessibilityDescription: "Album Art Wallpaper")
             button.image?.accessibilityDescription = "Album Art Wallpaper"
