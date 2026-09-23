@@ -1,3 +1,5 @@
+<img src="Resources/AppIcon.svg" width="96" height="96" alt="AlbumArtWallpaper icon">
+
 # AlbumArtWallpaper
 
 A macOS menu bar app that sets your desktop wallpaper to the album art of
@@ -14,6 +16,8 @@ whatever's currently playing in Music.app.
 - Lets you edit the current art in Preview, or pixelate it, right from the
   menu
 - Toggle "Fill Screen" to crop-to-fit vs. letterbox
+- On multi-monitor setups, opt individual displays out of the wallpaper from
+  the Monitors submenu
 - Updates itself in the background via [Sparkle](https://sparkle-project.org/),
   checking [GitHub Releases](https://github.com/semanticart/album-wallpaper/releases)
   once a day (toggle this, or manual "Check for Updates…", from the menu)
