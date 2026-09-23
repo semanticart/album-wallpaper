@@ -1,5 +1,7 @@
 import AppKit
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // MARK: - Track
 
@@ -133,10 +135,24 @@ enum Artwork {
         return nil
     }
 
-    /// Re-encodes anything NSImage can read as a high-quality JPEG.
+    /// Re-encodes anything NSImage can read as a high-quality progressive JPEG.
+    /// Progressive JFIF encoding runs noticeably smaller than baseline at the same
+    /// quality with no visual cost, which adds up across a large art cache.
     static func jpeg(from data: Data) -> Data? {
-        guard let rep = NSBitmapImageRep(data: data) else { return nil }
-        return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.95])
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        let properties: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: 0.95,
+            kCGImagePropertyJFIFDictionary: [kCGImagePropertyJFIFIsProgressive: true],
+        ]
+        CGImageDestinationAddImage(dest, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
     }
 }
 
