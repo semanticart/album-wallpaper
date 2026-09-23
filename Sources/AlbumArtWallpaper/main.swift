@@ -110,10 +110,13 @@ enum Artwork {
             let n = normalize(name)
             // Exact only: a fuzzy "contains" would let "Album (Live)" match the studio "Album".
             guard n == wantAlbum else { return nil }
-            var score = 4
+            // Artist must match too — same-titled albums/singles by unrelated artists are common
+            // (e.g. "Blinding Lights - Single" exists for The Weeknd, The Naked and Famous, etc.),
+            // and matching on title alone would happily hand back the wrong artist's cover.
             let a = normalize(item.artistName ?? "")
-            if a == wantArtist { score += 2 } else if a.contains(wantArtist) || wantArtist.contains(a) { score += 1 }
-            return (score, art)
+            if a == wantArtist { return (6, art) }
+            if a.contains(wantArtist) || wantArtist.contains(a) { return (5, art) }
+            return nil
         }
         guard let best = scored.max(by: { $0.score < $1.score }) else { return nil }
 
