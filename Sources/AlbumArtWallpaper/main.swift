@@ -201,7 +201,7 @@ enum Wallpaper {
     /// macOS caches wallpapers by path, so re-using one path after you edit the image would show
     /// the stale version. Instead every apply copies to a fresh filename and deletes the old copy.
     @MainActor
-    static func apply(_ source: URL, fill: Bool) {
+    static func apply(_ source: URL, fill: Bool, to screens: [NSScreen]) {
         let fm = FileManager.default
         let dest = ArtCache.live.appendingPathComponent("\(UUID().uuidString).\(source.pathExtension)")
         do { try fm.copyItem(at: source, to: dest) } catch {
@@ -215,14 +215,34 @@ enum Wallpaper {
         ]
         if !fill { options[.fillColor] = NSColor.black }
 
-        for screen in NSScreen.screens {
+        for screen in screens {
             do { try NSWorkspace.shared.setDesktopImageURL(dest, for: screen, options: options) } catch {
                 NSLog("setDesktopImageURL failed: \(error)")
             }
         }
 
+        // Excluded screens keep pointing at whatever Live/ file they were last set to, so it must
+        // survive this cleanup — only reap files no screen (included or not) still references.
+        let stillReferenced = Set(NSScreen.screens.compactMap { NSWorkspace.shared.desktopImageURL(for: $0) } + [dest])
         let old = (try? fm.contentsOfDirectory(at: ArtCache.live, includingPropertiesForKeys: nil)) ?? []
-        for url in old where url != dest { try? fm.removeItem(at: url) }
+        for url in old where !stillReferenced.contains(url) { try? fm.removeItem(at: url) }
+    }
+}
+
+// MARK: - Monitors
+
+/// Which screens get the wallpaper. Screens are identified by `localizedName` — the closest thing
+/// to a stable handle NSScreen offers across reconnects/reboots (displayID can reassign). Two
+/// monitors that happen to share a name will opt out together; that's an acceptable rough edge.
+enum Monitors {
+    static var excluded: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "excludedScreens") ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: "excludedScreens") }
+    }
+
+    static func included(from screens: [NSScreen]) -> [NSScreen] {
+        let excluded = excluded
+        return screens.filter { !excluded.contains($0.localizedName) }
     }
 }
 
@@ -234,6 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let nowPlayingItem = NSMenuItem(title: "Nothing playing", action: nil, keyEquivalent: "")
     private let enabledItem = NSMenuItem(title: "Set Wallpaper from Music", action: #selector(toggleEnabled), keyEquivalent: "")
     private let fillItem = NSMenuItem(title: "Fill Screen (crop to fit)", action: #selector(toggleFill), keyEquivalent: "")
+    private let monitorsItem = NSMenuItem(title: "Monitors", action: nil, keyEquivalent: "")
     private let editItem = NSMenuItem(title: "Edit Current Art in Preview", action: #selector(editCurrent), keyEquivalent: "e")
     private let pixelateItem = NSMenuItem(title: "Pixelate Current Art…", action: #selector(pixelateCurrent), keyEquivalent: "")
     private let redownloadItem = NSMenuItem(title: "Re-download Current Art (discards edits)", action: #selector(redownload), keyEquivalent: "")
@@ -293,11 +314,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Newly plugged-in monitors get the wallpaper too.
+        // Newly plugged-in monitors get the wallpaper too, and show up in the Monitors submenu.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.reapply() }
+            MainActor.assumeIsolated {
+                self?.reapply()
+                self?.refreshMenu()
+            }
         }
 
         // Re-apply when you save an edit to the current album's image.
@@ -332,6 +356,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(enabledItem)
         menu.addItem(fillItem)
+        monitorsItem.submenu = NSMenu()
+        menu.addItem(monitorsItem)
         menu.addItem(.separator())
         menu.addItem(editItem)
         menu.addItem(pixelateItem)
@@ -353,6 +379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshMenu() {
         enabledItem.state = enabled ? .on : .off
         fillItem.state = fill ? .on : .off
+        rebuildMonitorsMenu()
         if let t = current {
             nowPlayingItem.title = "♪ \(t.name) — \(t.artist)"
         } else {
@@ -376,6 +403,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installUpdatesAutomaticallyItem.isEnabled = checkForUpdates
     }
 
+    /// Every screen, checked by default; unchecking one opts it out of future wallpaper applies.
+    private func rebuildMonitorsMenu() {
+        let screens = NSScreen.screens
+        let excluded = Monitors.excluded
+        let submenu = NSMenu()
+        for screen in screens {
+            let item = NSMenuItem(title: screen.localizedName, action: #selector(toggleMonitor(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = screen.localizedName
+            item.state = excluded.contains(screen.localizedName) ? .off : .on
+            submenu.addItem(item)
+        }
+        monitorsItem.submenu = submenu
+        monitorsItem.isHidden = screens.count < 2
+    }
+
     // MARK: Actions
 
     @objc private func toggleEnabled() {
@@ -386,6 +429,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleFill() {
         fill.toggle()
+        refreshMenu()
+        reapply()
+    }
+
+    @objc private func toggleMonitor(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        var excluded = Monitors.excluded
+        if excluded.contains(name) { excluded.remove(name) } else { excluded.insert(name) }
+        Monitors.excluded = excluded
         refreshMenu()
         reapply()
     }
@@ -490,7 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func display(_ file: URL) {
         appliedFile = file
         appliedModDate = ArtCache.modificationDate(file)
-        Wallpaper.apply(file, fill: fill)
+        Wallpaper.apply(file, fill: fill, to: Monitors.included(from: NSScreen.screens))
         refreshMenu()
     }
 
