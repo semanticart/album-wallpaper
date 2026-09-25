@@ -18,6 +18,52 @@ struct Track: Equatable {
     }
 }
 
+// MARK: - Debug log
+//
+// Appends to ~/Library/Application Support/AlbumArtWallpaper/debug.log (also NSLog). Trimmed to
+// its newest half whenever it passes 512 KB, so it can stay on forever.
+
+enum DebugLog {
+    static let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("AlbumArtWallpaper/debug.log")
+    private static let queue = DispatchQueue(label: "debuglog")
+    private static let maxBytes = 512 * 1024
+    nonisolated(unsafe) private static let stamp: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.timeZone = .current
+        return f
+    }()
+
+    static func log(_ message: String) {
+        NSLog("%@", message)
+        queue.async {
+            let line = "\(stamp.string(from: Date())) \(message)\n"
+            let fm = FileManager.default
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: Data(line.utf8))
+            } else {
+                try? Data(line.utf8).write(to: url)
+            }
+            if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int, size > maxBytes,
+               let data = try? Data(contentsOf: url) {
+                let tail = data.suffix(maxBytes / 2)
+                let start = tail.firstIndex(of: 0x0A).map { tail.index(after: $0) } ?? tail.startIndex
+                try? Data(tail[start...]).write(to: url, options: .atomic)
+            }
+        }
+    }
+
+    static var versionString: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(short) (\(build))"
+    }
+}
+
 // MARK: - Cache
 //
 // One image per album at ~/Library/Application Support/AlbumArtWallpaper/Cache/<Artist - Album>.jpg
@@ -78,6 +124,24 @@ enum Artwork {
         let results: [Item]
     }
 
+    private struct DeezerResponse: Decodable {
+        struct Album: Decodable {
+            struct Artist: Decodable { let name: String }
+            let title: String
+            let artist: Artist
+            let cover_xl: String?
+            let cover_big: String?
+        }
+        let data: [Album]
+    }
+
+    private struct LookupFailure: Error { let reason: String }
+
+    private enum Outcome {
+        case hit(Data)
+        case miss(String)
+    }
+
     /// Strips edition noise like "(Deluxe Edition)" or "- Single", plus punctuation, so titles compare
     /// loosely. Other qualifiers — "(Live From Webster Hall)", "(Instrumental)" — are kept, because
     /// those are different releases with different art.
@@ -90,49 +154,140 @@ enum Artwork {
         return t.trimmingCharacters(in: .whitespaces)
     }
 
-    /// Asks the iTunes Search API for the album, then rewrites the 100px artwork URL to request the
-    /// largest size Apple's CDN will give us. Returns image data, or nil if nothing matched.
-    static func fetchHighRes(for track: Track) async -> Data? {
-        var comps = URLComponents(string: "https://itunes.apple.com/search")!
-        comps.queryItems = [
-            .init(name: "term", value: "\(track.artist) \(track.album)"),
-            .init(name: "entity", value: "album"),
-            .init(name: "limit", value: "15"),
+    /// Exact album match only: a fuzzy "contains" would let "Album (Live)" match the studio "Album".
+    /// The artist must match too — same-titled albums/singles by unrelated artists are common
+    /// (e.g. "Blinding Lights - Single" exists for The Weeknd, The Naked and Famous, etc.), and
+    /// matching on title alone would happily hand back the wrong artist's cover.
+    /// Returns 6 for an exact artist match, 5 for a partial one, nil for no match.
+    private static func matchScore(album: String, artist: String, for track: Track) -> Int? {
+        guard normalize(album) == normalize(track.album) else { return nil }
+        let a = normalize(artist), want = normalize(track.artist)
+        if a == want { return 6 }
+        if a.contains(want) || want.contains(a) { return 5 }
+        return nil
+    }
+
+    /// Tries each source in order and returns the first image, appending one entry per source tried
+    /// to `chain` (e.g. "iTunes album ✗ no results", "Deezer ✓ 212345 bytes") for the debug log.
+    static func fetchHighRes(for track: Track, chain: inout [String]) async -> Data? {
+        let sources: [(name: String, fetch: (Track) async -> Outcome)] = [
+            ("iTunes album", { await itunes(track: $0, entity: "album") }),
+            ("iTunes song", { await itunes(track: $0, entity: "song") }),
+            ("Deezer", { await deezer(track: $0) }),
         ]
-        guard let url = comps.url,
-              let (data, _) = try? await URLSession.shared.data(from: url),
-              let response = try? JSONDecoder().decode(SearchResponse.self, from: data)
-        else { return nil }
-
-        let wantAlbum = normalize(track.album)
-        let wantArtist = normalize(track.artist)
-
-        let scored: [(score: Int, art: String)] = response.results.compactMap { item in
-            guard let art = item.artworkUrl100, let name = item.collectionName else { return nil }
-            let n = normalize(name)
-            // Exact only: a fuzzy "contains" would let "Album (Live)" match the studio "Album".
-            guard n == wantAlbum else { return nil }
-            // Artist must match too — same-titled albums/singles by unrelated artists are common
-            // (e.g. "Blinding Lights - Single" exists for The Weeknd, The Naked and Famous, etc.),
-            // and matching on title alone would happily hand back the wrong artist's cover.
-            let a = normalize(item.artistName ?? "")
-            if a == wantArtist { return (6, art) }
-            if a.contains(wantArtist) || wantArtist.contains(a) { return (5, art) }
-            return nil
-        }
-        guard let best = scored.max(by: { $0.score < $1.score }) else { return nil }
-
-        // Apple's CDN serves any size up to the original master; ask big, fall back gracefully.
-        for size in ["3000x3000bb", "1400x1400bb", "600x600bb"] {
-            let hi = best.art.replacingOccurrences(of: "100x100bb", with: size)
-            guard let u = URL(string: hi),
-                  let (img, resp) = try? await URLSession.shared.data(from: u),
-                  (resp as? HTTPURLResponse)?.statusCode == 200,
-                  NSImage(data: img) != nil
-            else { continue }
-            return img
+        for source in sources {
+            switch await source.fetch(track) {
+            case .hit(let data):
+                chain.append("\(source.name) ✓ \(data.count) bytes")
+                return data
+            case .miss(let why):
+                chain.append("\(source.name) ✗ \(why)")
+            }
         }
         return nil
+    }
+
+    private static func getJSON<T: Decodable>(_ url: URL, as type: T.Type) async -> Result<T, LookupFailure> {
+        do {
+            let (data, resp) = try await URLSession.shared.data(from: url)
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            DebugLog.log("GET \(url.absoluteString) → HTTP \(status), \(data.count) bytes")
+            guard status == 200 else { return .failure(.init(reason: "HTTP \(status)")) }
+            do { return .success(try JSONDecoder().decode(T.self, from: data)) } catch {
+                DebugLog.log("decode failed: \(error); body: \(String(decoding: data.prefix(200), as: UTF8.self))")
+                return .failure(.init(reason: "bad response"))
+            }
+        } catch {
+            DebugLog.log("GET \(url.absoluteString) failed: \(error)")
+            return .failure(.init(reason: "request failed (\(error.localizedDescription))"))
+        }
+    }
+
+    /// Downloads the first candidate URL that returns a decodable image.
+    private static func download(_ candidates: [String]) async -> Data? {
+        for candidate in candidates {
+            guard let u = URL(string: candidate) else { continue }
+            do {
+                let (img, resp) = try await URLSession.shared.data(from: u)
+                let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                guard status == 200, NSImage(data: img) != nil else {
+                    DebugLog.log("image \(candidate) unusable: HTTP \(status), \(img.count) bytes")
+                    continue
+                }
+                DebugLog.log("image \(candidate) downloaded: \(img.count) bytes")
+                return img
+            } catch {
+                DebugLog.log("image \(candidate) request failed: \(error)")
+            }
+        }
+        return nil
+    }
+
+    /// Asks the iTunes Search API (for albums, or for songs and reading the album off each hit — this
+    /// finds releases the album search ranks poorly or misses), then rewrites the 100px artwork URL to
+    /// request the largest size Apple's CDN will give us.
+    private static func itunes(track: Track, entity: String) async -> Outcome {
+        var comps = URLComponents(string: "https://itunes.apple.com/search")!
+        let term = entity == "song" ? "\(track.artist) \(track.name)" : "\(track.artist) \(track.album)"
+        comps.queryItems = [
+            .init(name: "term", value: term),
+            .init(name: "entity", value: entity),
+            .init(name: "limit", value: entity == "song" ? "25" : "15"),
+        ]
+        guard let url = comps.url else { return .miss("bad URL") }
+        let response: SearchResponse
+        switch await getJSON(url, as: SearchResponse.self) {
+        case .success(let r): response = r
+        case .failure(let failure): return .miss(failure.reason)
+        }
+        if response.results.isEmpty { return .miss("no results") }
+
+        let scored: [(score: Int, art: String)] = response.results.compactMap { item in
+            guard let art = item.artworkUrl100, let name = item.collectionName,
+                  let score = matchScore(album: name, artist: item.artistName ?? "", for: track)
+            else { return nil }
+            return (score, art)
+        }
+        guard let best = scored.max(by: { $0.score < $1.score }) else {
+            let seen = response.results.prefix(3).map { "\($0.artistName ?? "?") — \($0.collectionName ?? "?")" }
+            DebugLog.log("iTunes \(entity): none of \(response.results.count) results matched album=\"\(normalize(track.album))\" artist=\"\(normalize(track.artist))\"; first: \(seen)")
+            return .miss("\(response.results.count) results, none matched")
+        }
+
+        // Apple's CDN serves any size up to the original master; ask big, fall back gracefully.
+        let sizes = ["3000x3000bb", "1400x1400bb", "600x600bb"]
+        if let img = await download(sizes.map { best.art.replacingOccurrences(of: "100x100bb", with: $0) }) {
+            return .hit(img)
+        }
+        return .miss("matched but image download failed")
+    }
+
+    /// Deezer's public search needs no key and serves 1000px covers.
+    private static func deezer(track: Track) async -> Outcome {
+        var comps = URLComponents(string: "https://api.deezer.com/search/album")!
+        comps.queryItems = [
+            .init(name: "q", value: "artist:\"\(track.artist)\" album:\"\(track.album)\""),
+            .init(name: "limit", value: "15"),
+        ]
+        guard let url = comps.url else { return .miss("bad URL") }
+        let response: DeezerResponse
+        switch await getJSON(url, as: DeezerResponse.self) {
+        case .success(let r): response = r
+        case .failure(let failure): return .miss(failure.reason)
+        }
+        if response.data.isEmpty { return .miss("no results") }
+
+        let scored: [(score: Int, art: [String])] = response.data.compactMap { item in
+            guard let score = matchScore(album: item.title, artist: item.artist.name, for: track) else { return nil }
+            return (score, [item.cover_xl, item.cover_big].compactMap { $0 })
+        }
+        guard let best = scored.max(by: { $0.score < $1.score }) else {
+            let seen = response.data.prefix(3).map { "\($0.artist.name) — \($0.title)" }
+            DebugLog.log("Deezer: none of \(response.data.count) results matched; first: \(seen)")
+            return .miss("\(response.data.count) results, none matched")
+        }
+        if let img = await download(best.art) { return .hit(img) }
+        return .miss("matched but image download failed")
     }
 
     /// Re-encodes anything NSImage can read as a high-quality progressive JPEG.
@@ -170,7 +325,7 @@ enum Music {
     private static func run(_ source: String) -> NSAppleEventDescriptor? {
         var error: NSDictionary?
         let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
-        if let error { NSLog("AppleScript error: \(error)") }
+        if let error { DebugLog.log("AppleScript error: \(error)") }
         return result
     }
 
@@ -190,8 +345,13 @@ enum Music {
     /// Artwork embedded in the file/library — used when the store lookup finds nothing.
     @MainActor
     static func embeddedArtwork() -> Data? {
-        guard isRunning else { return nil }
-        return run(#"tell application "Music" to return data of artwork 1 of current track"#)?.data
+        guard isRunning else {
+            DebugLog.log("embedded artwork: Music not running")
+            return nil
+        }
+        let data = run(#"tell application "Music" to return data of artwork 1 of current track"#)?.data
+        DebugLog.log("embedded artwork: \(data.map { "\($0.count) bytes" } ?? "none")")
+        return data
     }
 }
 
@@ -289,6 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ArtCache.prepare()
+        DebugLog.log("launched version \(DebugLog.versionString), macOS \(ProcessInfo.processInfo.operatingSystemVersionString), enabled=\(enabled)")
 
         // Before the menu is built, so it can offer "Check for Updates".
         updater.start()
@@ -309,7 +470,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let albumArtist = info["Album Artist"] as? String ?? ""
             let album = info["Album"] as? String ?? ""
             MainActor.assumeIsolated {
-                guard state != "Stopped", !album.isEmpty else { return }
+                DebugLog.log("playerInfo: state=\"\(state)\" name=\"\(name)\" artist=\"\(artist)\" albumArtist=\"\(albumArtist)\" album=\"\(album)\"")
+                guard state != "Stopped", !album.isEmpty else {
+                    DebugLog.log("playerInfo ignored (stopped or empty album)")
+                    return
+                }
                 self?.trackChanged(Track(name: name, artist: albumArtist.isEmpty ? artist : albumArtist, album: album))
             }
         }
@@ -331,7 +496,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editWatcher?.tolerance = 1  // lets the system coalesce these wakeups with others
 
         // Pick up whatever is already playing.
-        if let track = Music.currentTrack() { trackChanged(track) }
+        if let track = Music.currentTrack() {
+            trackChanged(track)
+        } else {
+            DebugLog.log("startup: no current track (Music not running, stopped, or Automation denied)")
+        }
     }
 
     // MARK: Menu
@@ -365,6 +534,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let reveal = NSMenuItem(title: "Reveal Cache in Finder", action: #selector(revealCache), keyEquivalent: "")
         reveal.target = self
         menu.addItem(reveal)
+        let showLog = NSMenuItem(title: "Show Debug Log", action: #selector(showDebugLog), keyEquivalent: "")
+        showLog.target = self
+        menu.addItem(showLog)
         menu.addItem(.separator())
         menu.addItem(updateAvailableItem)
         menu.addItem(checkForUpdatesItem)
@@ -485,6 +657,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func showDebugLog() {
+        if !FileManager.default.fileExists(atPath: DebugLog.url.path) {
+            try? Data().write(to: DebugLog.url)
+        }
+        NSWorkspace.shared.open(DebugLog.url)
+    }
+
     @objc private func checkForUpdatesNow() {
         updater.checkForUpdates()
     }
@@ -505,6 +684,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func trackChanged(_ track: Track) {
         guard track != current else { return }
+        DebugLog.log("track changed: \(track.name) — \(track.cacheKey); enabled=\(enabled)")
         current = track
         appliedFile = nil
         refreshMenu()
@@ -522,18 +702,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Cache hit → apply immediately. Miss → download high-res art, falling back to Music's embedded art.
     private func loadArt(for track: Track) {
         if let cached = ArtCache.existing(for: track) {
+            DebugLog.log("cache hit: \(cached.lastPathComponent)")
             display(cached)
             return
         }
         Task {
+            var chain: [String] = []
             var jpeg: Data?
-            if let data = await Artwork.fetchHighRes(for: track) { jpeg = Artwork.jpeg(from: data) }
-            if jpeg == nil, current == track, let data = Music.embeddedArtwork() { jpeg = Artwork.jpeg(from: data) }
+            if let data = await Artwork.fetchHighRes(for: track, chain: &chain) {
+                jpeg = Artwork.jpeg(from: data)
+                if jpeg == nil { chain.append("JPEG re-encode ✗") }
+            }
+            if jpeg == nil {
+                if current != track {
+                    chain.append("Music embedded ✗ skipped (track changed)")
+                } else if let data = Music.embeddedArtwork() {
+                    jpeg = Artwork.jpeg(from: data)
+                    chain.append(jpeg == nil ? "Music embedded ✗ re-encode failed" : "Music embedded ✓ \(data.count) bytes")
+                } else {
+                    chain.append("Music embedded ✗ none")
+                }
+            }
+            let summary = chain.joined(separator: " → ")
 
             guard let jpeg, let file = ArtCache.save(jpeg, for: track) else {
-                NSLog("no artwork found for \(track.cacheKey)")
+                DebugLog.log("art resolution for \(track.cacheKey): \(summary) — NOTHING FOUND")
                 return
             }
+            DebugLog.log("art resolution for \(track.cacheKey): \(summary)")
             // The song may have changed while we were downloading; the file is cached either way.
             if current == track { display(file) }
         }

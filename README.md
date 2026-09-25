@@ -8,8 +8,9 @@ whatever's currently playing in Music.app.
 ## Features
 
 - Watches Music.app and swaps the wallpaper on every track/album change
-- Looks up high-resolution art via the iTunes Search API, falling back to the
-  art embedded in your library if nothing is found
+- Looks up high-resolution art via the iTunes Search API (album, then song
+  search), then Deezer, falling back to the art embedded in your library if
+  nothing is found
 - Caches one image per album at
   `~/Library/Application Support/AlbumArtWallpaper/Cache/`, and never
   overwrites a cached file once it exists — so any edits you make stick
@@ -18,6 +19,9 @@ whatever's currently playing in Music.app.
 - Toggle "Fill Screen" to crop-to-fit vs. letterbox
 - On multi-monitor setups, opt individual displays out of the wallpaper from
   the Monitors submenu
+- Keeps a debug log (menu → Show Debug Log) at
+  `~/Library/Application Support/AlbumArtWallpaper/debug.log`, including which
+  art source each album resolved through
 - Updates itself in the background via [Sparkle](https://sparkle-project.org/),
   checking [GitHub Releases](https://github.com/semanticart/album-wallpaper/releases)
   once a day (toggle this, or manual "Check for Updates…", from the menu)
