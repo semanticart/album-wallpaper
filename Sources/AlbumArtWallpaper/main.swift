@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import ImageIO
+import ServiceManagement
 import UniformTypeIdentifiers
 
 // MARK: - Track
@@ -406,6 +407,30 @@ enum Monitors {
     }
 }
 
+// MARK: - Login item
+
+/// Registers the app to launch at login via `SMAppService`, which is also what shows up (and can be
+/// toggled) in System Settings → General → Login Items — that's the source of truth we read back.
+enum LoginItem {
+    static var isEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    static func setEnabled(_ enabled: Bool) {
+        guard enabled != isEnabled else { return }
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            DebugLog.log("login item \(enabled ? "registered" : "unregistered")")
+        } catch {
+            DebugLog.log("login item \(enabled ? "register" : "unregister") failed: \(error)")
+        }
+    }
+}
+
 // MARK: - App
 
 @MainActor
@@ -415,6 +440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let enabledItem = NSMenuItem(title: "Set Wallpaper from Music", action: #selector(toggleEnabled), keyEquivalent: "")
     private let fillItem = NSMenuItem(title: "Fill Screen (crop to fit)", action: #selector(toggleFill), keyEquivalent: "")
     private let monitorsItem = NSMenuItem(title: "Monitors", action: nil, keyEquivalent: "")
+    private let launchAtLoginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let editItem = NSMenuItem(title: "Edit Current Art in Preview", action: #selector(editCurrent), keyEquivalent: "e")
     private let pixelateItem = NSMenuItem(title: "Pixelate Current Art…", action: #selector(pixelateCurrent), keyEquivalent: "")
     private let redownloadItem = NSMenuItem(title: "Re-download Current Art (discards edits)", action: #selector(redownload), keyEquivalent: "")
@@ -450,6 +476,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ArtCache.prepare()
         DebugLog.log("launched version \(DebugLog.versionString), macOS \(ProcessInfo.processInfo.operatingSystemVersionString), enabled=\(enabled)")
+
+        // Defaults to on; after that, System Settings → General → Login Items (or our menu toggle) decides.
+        if !UserDefaults.standard.bool(forKey: "launchAtLoginDefaultApplied") {
+            UserDefaults.standard.set(true, forKey: "launchAtLoginDefaultApplied")
+            LoginItem.setEnabled(true)
+        }
 
         // Before the menu is built, so it can offer "Check for Updates".
         updater.start()
@@ -517,7 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         nowPlayingItem.isEnabled = false
         let targeted = [
-            enabledItem, fillItem, editItem, pixelateItem, redownloadItem,
+            enabledItem, fillItem, launchAtLoginItem, editItem, pixelateItem, redownloadItem,
             updateAvailableItem, checkForUpdatesItem, checkForUpdatesToggleItem, installUpdatesAutomaticallyItem,
         ]
         for item in targeted { item.target = self }
@@ -525,6 +557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(enabledItem)
         menu.addItem(fillItem)
+        menu.addItem(launchAtLoginItem)
         monitorsItem.submenu = NSMenu()
         menu.addItem(monitorsItem)
         menu.addItem(.separator())
@@ -551,6 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshMenu() {
         enabledItem.state = enabled ? .on : .off
         fillItem.state = fill ? .on : .off
+        launchAtLoginItem.state = LoginItem.isEnabled ? .on : .off
         rebuildMonitorsMenu()
         if let t = current {
             nowPlayingItem.title = "♪ \(t.name) — \(t.artist)"
@@ -603,6 +637,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fill.toggle()
         refreshMenu()
         reapply()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        LoginItem.setEnabled(!LoginItem.isEnabled)
+        refreshMenu()
     }
 
     @objc private func toggleMonitor(_ sender: NSMenuItem) {

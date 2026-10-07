@@ -7,6 +7,9 @@ whatever's currently playing in Music.app.
 
 ## Features
 
+- Starts at login by default (toggle from the menu, or from System Settings →
+  General → Login Items), and picks up whatever's already playing in
+  Music.app as soon as it launches
 - Watches Music.app and swaps the wallpaper on every track/album change
 - Looks up high-resolution art via the iTunes Search API (album, then song
   search), then Deezer, falling back to the art embedded in your library if
