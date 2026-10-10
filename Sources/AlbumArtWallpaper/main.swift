@@ -13,9 +13,11 @@ struct Track: Equatable {
 
     /// Human-readable cache filename stem, e.g. "Radiohead - OK Computer".
     var cacheKey: String {
-        let raw = "\(artist) - \(album)"
-        let cleaned = raw.map { "/:\\".contains($0) ? "_" : $0 }
-        return String(String(cleaned).prefix(150))
+        String(Track.fileSafe("\(artist) - \(album)").prefix(150))
+    }
+
+    static func fileSafe(_ s: String) -> String {
+        String(s.map { "/:\\".contains($0) ? "_" : $0 })
     }
 }
 
@@ -88,12 +90,38 @@ enum ArtCache {
     }
 
     /// The cached file for a track, whatever format you saved your edit in.
-    static func existing(for track: Track) -> URL? {
+    static func existing(for track: Track, in dir: URL = ArtCache.dir) -> URL? {
         for ext in extensions {
             let url = dir.appendingPathComponent("\(track.cacheKey).\(ext)")
             if FileManager.default.fileExists(atPath: url.path) { return url }
         }
         return nil
+    }
+
+    private static let collabSeparators = [" & ", ", ", " and ", " feat. ", " feat ", " ft. ", " ft ", " featuring ", " with ", " x ", " + ", " _ "]
+
+    /// Same album under a different artist credit ("A" vs "A & B") should share one image, so the
+    /// track is rewritten to use the artist of an already-cached copy when one is a collab form of the other.
+    static func canonical(_ track: Track, in dir: URL = ArtCache.dir) -> Track {
+        if existing(for: track, in: dir) != nil { return track }
+        let fold = { (s: String) in s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        let albumPart = fold(" - " + Track.fileSafe(track.album))
+        let wanted = fold(Track.fileSafe(track.artist))
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) where extensions.contains(file.pathExtension.lowercased()) {
+            let stem = fold(file.deletingPathExtension().lastPathComponent)
+            guard stem.hasSuffix(albumPart) else { continue }
+            let cachedArtist = String(stem.dropLast(albumPart.count))
+            let isAlias = collabSeparators.contains { sep in
+                cachedArtist.hasPrefix(wanted + sep) || wanted.hasPrefix(cachedArtist + sep)
+            }
+            guard isAlias else { continue }
+            // Recover the original-case artist from the real filename.
+            let realStem = file.deletingPathExtension().lastPathComponent
+            let artist = String(realStem.prefix(cachedArtist.count))
+            return Track(name: track.name, artist: artist, album: track.album)
+        }
+        return track
     }
 
     static func save(_ jpeg: Data, for track: Track) -> URL? {
@@ -721,7 +749,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Track handling
 
-    private func trackChanged(_ track: Track) {
+    private func trackChanged(_ incoming: Track) {
+        let track = ArtCache.canonical(incoming)
         guard track != current else { return }
         DebugLog.log("track changed: \(track.name) — \(track.cacheKey); enabled=\(enabled)")
         current = track
